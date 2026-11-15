@@ -1,0 +1,98 @@
+#include <stdint.h>
+
+#define VGA   ((volatile uint16_t *)0xB8000)
+#define COLS  80
+#define ROWS  25
+
+static inline void outb(uint16_t p, uint8_t v) {
+    __asm__ volatile ("outb %0, %1" : : "a"(v), "Nd"(p));
+}
+static inline uint8_t inb(uint16_t p) {
+    uint8_t v;
+    __asm__ volatile ("inb %1, %0" : "=a"(v) : "Nd"(p));
+    return v;
+}
+
+/* ---------- Video ---------- */
+static int cur_x, cur_y;
+#define COR_FUNDO 0x1F   /* branco sobre azul  */
+#define COR_BARRA 0x70   /* preto sobre cinza  */
+
+static void vga_clear(void) {
+    for (int i = 0; i < COLS * ROWS; i++)
+        VGA[i] = (COR_FUNDO << 8) | ' ';
+    cur_x = cur_y = 0;
+}
+
+static void vga_puts_at(int x, int y, const char *s, uint8_t cor) {
+    while (*s) VGA[y * COLS + x++] = (cor << 8) | (uint8_t)*s++;
+}
+
+static void desenhar_barra_tarefas(void) {
+    for (int x = 0; x < COLS; x++)
+        VGA[(ROWS - 1) * COLS + x] = (COR_BARRA << 8) | ' ';
+    vga_puts_at(1, ROWS - 1, "BossOS", COR_BARRA);
+}
+
+static void scroll(void) {
+    for (int i = 0; i < COLS * (ROWS - 2); i++)
+        VGA[i] = VGA[i + COLS];
+    for (int x = 0; x < COLS; x++)
+        VGA[(ROWS - 2) * COLS + x] = (COR_FUNDO << 8) | ' ';
+    cur_y = ROWS - 2;
+}
+
+static void putc(char c) {
+    if (c == '\n') { cur_x = 0; cur_y++; }
+    else if (c == '\b') {
+        if (cur_x > 0) { cur_x--; VGA[cur_y * COLS + cur_x] = (COR_FUNDO << 8) | ' '; }
+    } else {
+        VGA[cur_y * COLS + cur_x++] = (COR_FUNDO << 8) | (uint8_t)c;
+        if (cur_x >= COLS) { cur_x = 0; cur_y++; }
+    }
+    if (cur_y >= ROWS - 1) scroll();
+}
+
+static void puts(const char *s) { while (*s) putc(*s++); }
+
+/* ---------- Relogio (CMOS) ---------- */
+static uint8_t cmos(uint8_t reg) { outb(0x70, reg); return inb(0x71); }
+static uint8_t bcd(uint8_t v)    { return (v & 0x0F) + (v >> 4) * 10; }
+
+static void atualizar_relogio(void) {
+    while (cmos(0x0A) & 0x80) ;                 /* espera fim do update */
+    uint8_t s = cmos(0x00), m = cmos(0x02), h = cmos(0x04);
+    if (!(cmos(0x0B) & 0x04)) { s = bcd(s); m = bcd(m); h = bcd(h); }
+    char t[9] = { '0' + h / 10, '0' + h % 10, ':',
+                  '0' + m / 10, '0' + m % 10, ':',
+                  '0' + s / 10, '0' + s % 10, 0 };
+    vga_puts_at(COLS - 9, ROWS - 1, t, COR_BARRA);
+}
+
+/* ---------- Teclado (scancode set 1, layout US) ---------- */
+static const char mapa[58] = {
+    0, 27, '1','2','3','4','5','6','7','8','9','0','-','=','\b','\t',
+    'q','w','e','r','t','y','u','i','o','p','[',']','\n', 0,
+    'a','s','d','f','g','h','j','k','l',';','\'','`', 0,'\\',
+    'z','x','c','v','b','n','m',',','.','/', 0,'*', 0,' '
+};
+
+static void verificar_teclado(void) {
+    if (!(inb(0x64) & 1)) return;
+    uint8_t sc = inb(0x60);
+    if (sc & 0x80) return;                      /* tecla solta */
+    if (sc < sizeof(mapa) && mapa[sc]) putc(mapa[sc]);
+}
+
+/* ---------- Kernel ---------- */
+void kmain(uint32_t boot_drive) {
+    (void)boot_drive;
+    vga_clear();
+    desenhar_barra_tarefas();
+    puts("BossOS 32 bits (C)\nDigite algo:\n> ");
+
+    for (;;) {
+        atualizar_relogio();
+        verificar_teclado();
+    }
+}
