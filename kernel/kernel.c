@@ -3,6 +3,8 @@
 #include "keyboard.h"
 #include "timer.h"
 #include "arch.h"
+#include "paging.h"
+#include "sched.h"
 #include "pci.h"
 #include "blk.h"
 #include "fs.h"
@@ -10,14 +12,16 @@
 #include "drv.h"
 #include "heal.h"
 #include "splash.h"
+#include "disktool.h"
 #include "ui.h"
 #include "terminal.h"
 
 typedef struct { const char *nome; void (*run)(void); } frontend_t;
 
 static const frontend_t frontends[] = {
-    { "Interface (modo texto)", ui_run },
-    { "Terminal",               terminal_run },
+    { "Interface (modo texto)",           ui_run },
+    { "Terminal",                         terminal_run },
+    { "Discos, particoes e instalador",   disktool_run },
 };
 #define N_FRONT ((int)(sizeof(frontends) / sizeof(frontends[0])))
 
@@ -30,12 +34,14 @@ static void init_nucleo(void) {
     pic_init();
     timer_init(100);
     kb_init();
-    heal_init();
+    heal_init();                 /* backup do texto ANTES de ele virar somente leitura */
+    paging_init();
+    sched_init();
     __asm__ volatile ("sti");
 }
 static void detecta_hw(void) { pci_init(); blk_init(); }
 static void montar_fs(void) {
-    fs_res = fs_mount();
+    fs_res = fs_mount();                                   /* so volumes com rotulo BOSSOS */
     if (fs_res == 0) {
         uint32_t a, r;
         if (fsck_run(true, &a, &r) == 0 && a) {
@@ -51,27 +57,28 @@ static void dois(uint32_t v) { vga_putc('0' + v / 10); vga_putc('0' + v % 10); }
 static void resumo(void) {
     vga_puts("BossOS 32 bits - kernel em C\n");
     vga_puts("[ok] GDT/TSS, IDT, PIC, timer 100 Hz, teclado por IRQ\n");
+    vga_puts("[ok] paginacao: kernel RO (WP), "); put_dec(frames_total() * 4 / 1024);
+    vga_puts(" MB de frames; escalonador de processos\n");
     vga_puts("[ok] pci: "); put_dec(pci_count()); vga_puts(" dispositivo(s)\n");
-    vga_puts("[ok] blocos: backend "); vga_puts(blk_backend()); vga_putc('\n');
-    for (int i = 0; i < blk_count(); i++) {
-        const blk_info_t *d = blk_info(i);
+    vga_puts("[ok] discos ("); vga_puts(blk_backend()); vga_puts(", leitura apenas; escrita so pelo disktool): ");
+    put_dec(disk_count()); vga_putc('\n');
+    for (int i = 0; i < disk_count(); i++) {
+        const blk_info_t *d = disk_info(i);
         vga_puts("     "); vga_puts(d->nome); vga_puts(": "); vga_puts(d->modelo);
         vga_putc(' '); put_dec(d->setores / 2048); vga_puts(" MB\n");
     }
     if (fs_res == 0) {
         uint32_t t, l; fs_info(&t, &l);
-        vga_puts("[ok] FAT32: "); put_dec(t / 1024); vga_puts(" MB, ");
+        vga_puts("[ok] volume BOSSOS: "); put_dec(t / 1024); vga_puts(" MB, ");
         put_dec(l / 1024); vga_puts(" MB livres\n");
     } else {
-        vga_puts("[--] sem FAT32: "); vga_puts(fs_strerror(fs_res)); vga_putc('\n');
+        vga_puts("[--] nenhum volume BOSSOS montado (use 'install' ou o modo Discos)\n");
     }
     if (rtc_ring3 >= 0) {
-        vga_puts("[ok] drivers em ring 3: rtc respondeu ");
+        vga_puts("[ok] driver rtc em ring 3: ");
         dois((rtc_ring3 >> 16) & 0xFF); vga_putc(':');
         dois((rtc_ring3 >> 8) & 0xFF);  vga_putc(':');
         dois(rtc_ring3 & 0xFF);         vga_putc('\n');
-    } else {
-        vga_puts("[--] driver rtc de ring 3 nao respondeu\n");
     }
 }
 
@@ -92,9 +99,9 @@ void kmain(uint32_t boot_drive) {
     vga_init();
 
     splash_init();
-    splash_step("Nucleo: GDT, TSS, IDT, PIC e timer...", 20, init_nucleo);
+    splash_step("Nucleo: GDT, IDT, PIC, paginacao e processos...", 20, init_nucleo);
     splash_step("Detectando PCI e discos (IDE/AHCI)...", 50, detecta_hw);
-    splash_step("Montando e verificando o FAT32...", 75, montar_fs);
+    splash_step("Montando o volume BOSSOS...", 75, montar_fs);
     splash_step("Iniciando drivers em ring 3...", 100, init_drivers);
     splash_end();
 

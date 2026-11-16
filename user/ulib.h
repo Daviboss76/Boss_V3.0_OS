@@ -1,7 +1,8 @@
 #ifndef ULIB_H
 #define ULIB_H
 #include <stdint.h>
-#include "abi.h"
+#include <uapi.h>
+#include <abi.h>
 
 static inline uint32_t sys3(uint32_t n, uint32_t a, uint32_t b) {
     uint32_t r;
@@ -19,3 +20,4 @@ static inline uint8_t inb(uint16_t p) { uint8_t v; __asm__ volatile ("inb %1,%0"
     void __attribute__((section(".text.start"), noreturn)) _start(void) { \
         fn(MBOX); sys3(SYS_EXIT, 0, 0); for (;;) ; }
 #endif
+

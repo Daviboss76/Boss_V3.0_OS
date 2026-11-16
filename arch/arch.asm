@@ -1,11 +1,11 @@
 [bits 32]
 extern isr_handler
 global gdt_load, tss_load, idt_load, enter_user, ksetjmp, klongjmp
-global isr_table, isr128
+global isr_table, isr128, isr129
 
 section .text
 
-gdt_load:                       ; void gdt_load(gdtr_t *p)
+gdt_load:
     mov eax, [esp + 4]
     lgdt [eax]
     mov ax, 0x10
@@ -23,12 +23,12 @@ tss_load:
     ltr ax
     ret
 
-idt_load:                       ; void idt_load(idtr_t *p)
+idt_load:
     mov eax, [esp + 4]
     lidt [eax]
     ret
 
-enter_user:                     ; void enter_user(eip, esp) -> ring 3
+enter_user:
     mov eax, [esp + 4]
     mov ecx, [esp + 8]
     mov dx, 0x23
@@ -36,14 +36,14 @@ enter_user:                     ; void enter_user(eip, esp) -> ring 3
     mov es, dx
     mov fs, dx
     mov gs, dx
-    push dword 0x23             ; ss
-    push ecx                    ; esp
-    push dword 0x202            ; eflags (IF=1, IOPL=0)
-    push dword 0x1B             ; cs
-    push eax                    ; eip
+    push dword 0x23
+    push ecx
+    push dword 0x202
+    push dword 0x1B
+    push eax
     iretd
 
-ksetjmp:                        ; int ksetjmp(kjmp_t *b)
+ksetjmp:
     mov edx, [esp + 4]
     mov [edx + 0], ebx
     mov [edx + 4], esi
@@ -56,7 +56,7 @@ ksetjmp:                        ; int ksetjmp(kjmp_t *b)
     xor eax, eax
     ret
 
-klongjmp:                       ; void klongjmp(kjmp_t *b, int v)
+klongjmp:
     mov edx, [esp + 4]
     mov eax, [esp + 8]
     test eax, eax
@@ -70,7 +70,6 @@ klongjmp:                       ; void klongjmp(kjmp_t *b, int v)
     mov esp, [edx + 16]
     jmp [edx + 20]
 
-; ---------- stubs de excecao / IRQ / syscall ----------
 %macro ISR_NOERR 1
 isr%1:
     push dword 0
@@ -110,6 +109,12 @@ isr128:
     push dword 0x80
     jmp isr_common
 
+isr129:
+    push dword 0
+    push dword 0x81
+    jmp isr_common
+
+; isr_handler devolve em EAX o contexto (regs_t*) a retomar: e aqui que o escalonador troca de processo
 isr_common:
     pushad
     push ds
@@ -125,6 +130,7 @@ isr_common:
     push esp
     call isr_handler
     add esp, 4
+    mov esp, eax
     pop gs
     pop fs
     pop es

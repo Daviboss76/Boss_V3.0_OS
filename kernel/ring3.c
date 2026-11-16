@@ -2,6 +2,7 @@
 #include "vga.h"
 #include "arch.h"
 #include "timer.h"
+#include "uapi.h"
 #include "ring3.h"
 
 static kjmp_t ctx;

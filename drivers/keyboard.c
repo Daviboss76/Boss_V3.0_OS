@@ -1,6 +1,7 @@
 #include "kernel.h"
 #include "arch.h"
 #include "heal.h"
+#include "sched.h"
 #include "keyboard.h"
 
 static const char normal[58] = {
@@ -17,7 +18,8 @@ static const char shifted[58] = {
 #define KB_N 64
 static volatile int fila[KB_N];
 static volatile uint8_t ini, fim;
-static bool shift, e0;
+static volatile bool intr;
+static bool shift, ctrl, e0;
 
 static void empilha(int c) {
     uint8_t nf = (fim + 1) % KB_N;
@@ -29,6 +31,7 @@ static void decodifica(uint8_t sc) {
     if (sc == 0xE0) { e0 = true; return; }
     bool solta = sc & 0x80;
     sc &= 0x7F;
+    if (sc == 0x1D) { ctrl = !solta; e0 = false; return; }       /* Ctrl esq/dir */
     if (e0) {
         e0 = false;
         if (solta) return;
@@ -42,6 +45,7 @@ static void decodifica(uint8_t sc) {
         return;
     }
     if (sc == 0x2A || sc == 0x36) { shift = !solta; return; }
+    if (ctrl && sc == 0x2E) { if (!solta) intr = true; return; } /* Ctrl+C */
     if (solta || sc >= 58) return;
     char c = shift ? shifted[sc] : normal[sc];
     if (c) empilha((uint8_t)c);
@@ -50,10 +54,11 @@ static void decodifica(uint8_t sc) {
 static void irq1(regs_t *r) {
     (void)r;
     if (inb(0x64) & 1) decodifica(inb(0x60));
+    sched_wake_tecla();
 }
 
 void kb_init(void) {
-    while (inb(0x64) & 1) inb(0x60);       /* descarrega o buffer do controlador */
+    while (inb(0x64) & 1) inb(0x60);
     irq_register(1, irq1);
 }
 int kb_poll(void) {
@@ -62,11 +67,13 @@ int kb_poll(void) {
     ini = (ini + 1) % KB_N;
     return c;
 }
+bool kb_intr_take(void) { bool v = intr; intr = false; return v; }
+
 int kb_getc(void) {
     int c;
     while ((c = kb_poll()) < 0) {
         heal_poll();
-        __asm__ volatile ("hlt");
+        sched_idle();
     }
     return c;
 }

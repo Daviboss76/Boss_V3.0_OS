@@ -9,6 +9,9 @@
 #include "drv.h"
 #include "heal.h"
 #include "timer.h"
+#include "paging.h"
+#include "sched.h"
+#include "disktool.h"
 #include "ui.h"
 #include "terminal.h"
 
@@ -33,7 +36,11 @@ static uint32_t num(const char *s) {
     return v;
 }
 static void dois(uint32_t v) { vga_putc('0' + v / 10); vga_putc('0' + v % 10); }
-static void erro(int e) { vga_puts("erro: "); vga_puts(fs_strerror(e)); vga_putc('\n'); }
+static void erro(int e) {
+    vga_puts("erro: ");
+    vga_puts(e <= -20 ? proc_strerror(e) : fs_strerror(e));
+    vga_putc('\n');
+}
 static void falta(void) { vga_puts("faltou argumento\n"); }
 static void drv_erro(int e) {
     vga_puts("driver: ");
@@ -53,13 +60,15 @@ static void ler_linha(char *buf, int max) {
     }
 }
 
-/* ---------- comandos basicos ---------- */
+/* ---------- basicos ---------- */
 static void c_clear(char *a)  { (void)a; vga_clear(COR_TXT); }
-static void c_ver(char *a)    { (void)a; vga_puts("BossOS 0.3 - kernel em C, 32 bits, ring 3, AHCI/IDE\n"); }
+static void c_ver(char *a)    { (void)a; vga_puts("BossOS 0.4 - kernel em C, 32 bits, paginacao, processos ELF, ring 3\n"); }
 static void c_echo(char *a)   { vga_puts(a); vga_putc('\n'); }
 static void c_exit(char *a)   { (void)a; sair = true; }
 static void c_ui(char *a)     { (void)a; ui_run(); vga_clear(COR_TXT); }
 static void c_reboot(char *a) { (void)a; outb(0x64, 0xFE); for (;;) __asm__ volatile ("hlt"); }
+static void c_disktool(char *a) { (void)a; disktool_run(); }
+static void c_install(char *a)  { (void)a; install_run(); }
 
 static void c_uptime(char *a) {
     (void)a; uint32_t s = ticks / 100;
@@ -77,8 +86,6 @@ static void c_lspci(char *a) {
         vga_putc('\n');
     }
 }
-
-/* date usa o driver de ring 3; se ele falhar, cai para o relogio do kernel */
 static void c_date(char *a) {
     (void)a; int32_t r;
     if (drv_call("rtc", 1, 0, 0, 0, 0, &r) == DRV_OK) {
@@ -90,16 +97,34 @@ static void c_date(char *a) {
         vga_puts("  [fallback ring 0]\n");
     }
 }
-
 static void c_disks(char *a) {
     (void)a;
-    vga_puts("backend ativo: "); vga_puts(blk_backend());
-    vga_puts("   erros de E/S: "); put_dec(blk_erros()); vga_putc('\n');
-    for (int i = 0; i < blk_count(); i++) {
-        const blk_info_t *d = blk_info(i);
-        vga_puts(d->nome); vga_puts(": "); vga_puts(d->modelo);
+    vga_puts("backend: "); vga_puts(blk_backend()); vga_puts("   erros de E/S: "); put_dec(blk_erros());
+    vga_puts("\ndiscos fisicos (somente leitura fora do disktool):\n");
+    for (int i = 0; i < disk_count(); i++) {
+        const blk_info_t *d = disk_info(i);
+        vga_puts("  "); vga_puts(d->nome); vga_puts(": "); vga_puts(d->modelo);
         vga_puts("  "); put_dec(d->setores / 2048); vga_puts(" MB\n");
     }
+    vga_puts("volumes BOSSOS (visiveis ao FAT32):\n");
+    for (int i = 0; i < blk_count(); i++) {
+        int dk; uint32_t ini, tam;
+        blk_vol_info(i, &dk, &ini, &tam);
+        vga_puts("  "); vga_puts(blk_info(i)->nome); vga_puts(": disco"); put_dec(dk);
+        vga_puts(", inicio "); put_dec(ini / 2048); vga_puts(" MB, "); put_dec(tam / 2048); vga_puts(" MB\n");
+    }
+}
+static void c_mem(char *a) {
+    (void)a;
+    vga_puts("frames: "); put_dec(frames_used() * 4); vga_puts(" KB usados de ");
+    put_dec(frames_total() * 4); vga_puts(" KB\n");
+    vga_puts("paginacao ligada; texto e rodata do kernel somente leitura (WP)\n");
+}
+static void c_smash(char *a) {
+    (void)a;
+    vga_puts("tentando escrever no texto do kernel...\n");
+    *(volatile uint8_t *)(uintptr_t)terminal_run = 0;
+    vga_puts("(nao deveria chegar aqui)\n");
 }
 
 /* ---------- arquivos ---------- */
@@ -110,20 +135,14 @@ static void c_df(char *a) {
     vga_puts(" KB   usado: "); put_dec(t - l); vga_puts(" KB\n");
 }
 static void c_pwd(char *a) { (void)a; vga_puts(fs_cwd()); vga_putc('\n'); }
-static void c_cd(char *a) {
-    char *p = prox(&a);
-    int r = fs_chdir(p ? p : "/"); if (r) erro(r);
-}
+static void c_cd(char *a) { char *p = prox(&a); int r = fs_chdir(p ? p : "/"); if (r) erro(r); }
 static void ls_cb(const char *nome, bool dir, uint32_t tam) {
     vga_puts(nome);
-    for (int l = strlen(nome); l < 14; l++) vga_putc(' ');
+    for (int l = (int)strlen(nome); l < 14; l++) vga_putc(' ');
     if (dir) vga_puts("<DIR>"); else put_dec(tam);
     vga_putc('\n');
 }
-static void c_ls(char *a) {
-    char *p = prox(&a);
-    int r = fs_list(p ? p : ".", ls_cb); if (r) erro(r);
-}
+static void c_ls(char *a) { char *p = prox(&a); int r = fs_list(p ? p : ".", ls_cb); if (r) erro(r); }
 static void c_cat(char *a) {
     char *p = prox(&a); if (!p) { falta(); return; }
     uint32_t n; int r = fs_read(p, filebuf, sizeof filebuf, &n);
@@ -146,14 +165,8 @@ static void c_touch(char *a) {
     if (r == FS_ENOENT) r = fs_write(p, "", 0);
     if (r) erro(r);
 }
-static void c_mkdir(char *a) {
-    char *p = prox(&a); if (!p) { falta(); return; }
-    int r = fs_mkdir(p); if (r) erro(r);
-}
-static void c_rm(char *a) {
-    char *p = prox(&a); if (!p) { falta(); return; }
-    int r = fs_remove(p); if (r) erro(r);
-}
+static void c_mkdir(char *a) { char *p = prox(&a); if (!p) { falta(); return; } int r = fs_mkdir(p); if (r) erro(r); }
+static void c_rm(char *a)    { char *p = prox(&a); if (!p) { falta(); return; } int r = fs_remove(p); if (r) erro(r); }
 static void c_cp(char *a) {
     char *s = prox(&a), *d = prox(&a);
     if (!s || !d) { falta(); return; }
@@ -171,23 +184,30 @@ static void c_hexdump(char *a) {
             if (o + i < n) put_hex((uint8_t)filebuf[o + i], 2); else vga_puts("  ");
             vga_putc(' ');
         }
-        for (uint32_t i = 0; i < 16 && o + i < n; i++) {
-            char c = filebuf[o + i]; vga_putc(c >= 32 && c < 127 ? c : '.');
-        }
+        for (uint32_t i = 0; i < 16 && o + i < n; i++) { char c = filebuf[o + i]; vga_putc(c >= 32 && c < 127 ? c : '.'); }
         vga_putc('\n');
     }
 }
+static void c_fsck(char *a) {
+    char *p = prox(&a); bool rep = p && !strcmp(p, "-r");
+    uint32_t ac, re;
+    if (fsck_run(rep, &ac, &re)) { vga_puts("fsck: nenhum volume BOSSOS\n"); return; }
+    vga_puts("problemas: "); put_dec(ac);
+    if (rep) { vga_puts("  setores reparados: "); put_dec(re); fs_mount(); }
+    else if (ac) vga_puts("  (use 'fsck -r' para reparar)");
+    vga_putc('\n');
+}
 
-/* ---------- ring 3 e autorreparo ---------- */
+/* ---------- ring 3 / autorreparo ---------- */
 static void c_drv(char *a) {
     (void)a;
     static const char *const est[] = { "descarregado", "ativo", "QUARENTENA" };
     for (int i = 0; i < drv_count(); i++) {
         drv_stat_t s; drv_stat(i, &s);
         vga_puts(s.nome);
-        for (int l = strlen(s.nome); l < 6; l++) vga_putc(' ');
+        for (int l = (int)strlen(s.nome); l < 6; l++) vga_putc(' ');
         vga_puts(est[s.estado]);
-        for (int l = strlen(est[s.estado]); l < 14; l++) vga_putc(' ');
+        for (int l = (int)strlen(est[s.estado]); l < 14; l++) vga_putc(' ');
         vga_puts("chamadas="); put_dec(s.chamadas);
         vga_puts(" falhas="); put_dec(s.falhas);
         vga_puts(" reinicios="); put_dec(s.reinicios); vga_putc('\n');
@@ -235,49 +255,82 @@ static void c_corrupt(char *a) {
     heal_canario_danificar();
     vga_puts("1 byte do texto do kernel foi corrompido. Rode: heal check\n");
 }
-static void c_fsck(char *a) {
-    char *p = prox(&a); bool rep = p && !strcmp(p, "-r");
-    uint32_t ac, re;
-    if (fsck_run(rep, &ac, &re)) { vga_puts("fsck: FAT32 nao encontrado\n"); return; }
-    vga_puts("problemas: "); put_dec(ac);
-    if (rep) { vga_puts("  setores reparados: "); put_dec(re); fs_mount(); }
-    else if (ac) vga_puts("  (use 'fsck -r' para reparar)");
-    vga_putc('\n');
+
+/* ---------- processos ---------- */
+static void c_run(char *a) {
+    char *p = prox(&a); if (!p) { falta(); return; }
+    int pid = proc_spawn_file(p);
+    if (pid < 0) { erro(pid); return; }
+    int cod = 0;
+    proc_wait(pid, &cod);
+    vga_puts("[processo "); put_dec(pid); vga_puts(" terminou, codigo "); vga_puts(cod < 0 ? "-" : ""); put_dec(cod < 0 ? -cod : cod); vga_puts("]\n");
+}
+static void c_bg(char *a) {
+    char *p = prox(&a); if (!p) { falta(); return; }
+    int pid = proc_spawn_file(p);
+    if (pid < 0) { erro(pid); return; }
+    vga_puts("[processo "); put_dec(pid); vga_puts(" em segundo plano]\n");
+}
+static void c_ps(char *a) {
+    (void)a;
+    static const char *const est[] = { "livre", "pronto", "rodando", "dorme", "tecla", "filho", "zumbi" };
+    vga_puts("pid nome            estado   cpu(ticks)  RAM(KB)\n");
+    for (int i = 0; i < 8; i++) {
+        char nome[16]; int e; uint32_t cpu, kb;
+        if (proc_info(i, nome, &e, &cpu, &kb)) continue;
+        put_dec(i); vga_puts("   "); vga_puts(nome);
+        for (int l = (int)strlen(nome); l < 16; l++) vga_putc(' ');
+        vga_puts(est[e]);
+        for (int l = (int)strlen(est[e]); l < 9; l++) vga_putc(' ');
+        put_dec(cpu); vga_puts("          "); put_dec(kb); vga_putc('\n');
+    }
+}
+static void c_kill(char *a) {
+    char *p = prox(&a); if (!p) { falta(); return; }
+    proc_kill((int)num(p));
 }
 
 typedef struct { const char *nome, *ajuda; void (*fn)(char *); } cmd_t;
 static void c_help(char *a);
 static const cmd_t cmds[] = {
-    { "help",    "lista os comandos",               c_help },
-    { "clear",   "limpa a tela",                    c_clear },
-    { "ver",     "versao do sistema",               c_ver },
-    { "uptime",  "tempo ligado",                    c_uptime },
-    { "echo",    "echo <texto>",                    c_echo },
-    { "date",    "hora (driver rtc em ring 3)",     c_date },
-    { "lspci",   "dispositivos PCI",                c_lspci },
-    { "disks",   "discos e backend (IDE/AHCI)",     c_disks },
-    { "df",      "espaco do FAT32",                 c_df },
-    { "pwd",     "diretorio atual",                 c_pwd },
-    { "cd",      "cd <pasta>",                      c_cd },
-    { "ls",      "ls [pasta]",                      c_ls },
-    { "cat",     "cat <arquivo>",                   c_cat },
-    { "write",   "write <arquivo> <texto>",         c_write },
-    { "touch",   "touch <arquivo>",                 c_touch },
-    { "mkdir",   "mkdir <pasta>",                   c_mkdir },
-    { "rm",      "rm <arquivo|pasta vazia>",        c_rm },
-    { "cp",      "cp <origem> <destino>",           c_cp },
-    { "hexdump", "hexdump <arquivo> (256 bytes)",   c_hexdump },
-    { "drv",     "drivers de ring 3 e estado",      c_drv },
-    { "beep",    "beep [hz] [ms] (ring 3)",         c_beep },
-    { "crc",     "crc <arquivo> (CRC32 em ring 3)", c_crc },
-    { "crash",   "crash <0-6> testa o driver bug",  c_crash },
-    { "oops",    "falha em ring 0 (recuperavel)",   c_oops },
-    { "corrupt", "corrompe 1 byte do kernel",       c_corrupt },
-    { "heal",    "heal | heal check",               c_heal },
-    { "fsck",    "fsck [-r] verifica/repara a FAT", c_fsck },
-    { "ui",      "abre a interface",                c_ui },
-    { "reboot",  "reinicia",                        c_reboot },
-    { "exit",    "volta ao menu",                   c_exit },
+    { "help",     "lista os comandos",               c_help },
+    { "clear",    "limpa a tela",                    c_clear },
+    { "ver",      "versao do sistema",               c_ver },
+    { "uptime",   "tempo ligado",                    c_uptime },
+    { "echo",     "echo <texto>",                    c_echo },
+    { "date",     "hora (driver rtc em ring 3)",     c_date },
+    { "lspci",    "dispositivos PCI",                c_lspci },
+    { "disks",    "discos fisicos e volumes",        c_disks },
+    { "disktool", "gerenciador de discos/particoes", c_disktool },
+    { "install",  "instalador guiado",               c_install },
+    { "df",       "espaco do volume BOSSOS",         c_df },
+    { "pwd",      "diretorio atual",                 c_pwd },
+    { "cd",       "cd <pasta>",                      c_cd },
+    { "ls",       "ls [pasta]",                      c_ls },
+    { "cat",      "cat <arquivo>",                   c_cat },
+    { "write",    "write <arquivo> <texto>",         c_write },
+    { "touch",    "touch <arquivo>",                 c_touch },
+    { "mkdir",    "mkdir <pasta>",                   c_mkdir },
+    { "rm",       "rm <arquivo|pasta vazia>",        c_rm },
+    { "cp",       "cp <origem> <destino>",           c_cp },
+    { "hexdump",  "hexdump <arquivo> (256 bytes)",   c_hexdump },
+    { "run",      "run <prog.elf> (Ctrl+C mata)",    c_run },
+    { "bg",       "bg <prog.elf> (segundo plano)",   c_bg },
+    { "ps",       "lista processos",                 c_ps },
+    { "kill",     "kill <pid>",                      c_kill },
+    { "mem",      "memoria e paginacao",             c_mem },
+    { "smash",    "escreve no texto do kernel (#PF)",c_smash },
+    { "drv",      "drivers de ring 3 e estado",      c_drv },
+    { "beep",     "beep [hz] [ms] (ring 3)",         c_beep },
+    { "crc",      "crc <arquivo> (CRC32 em ring 3)", c_crc },
+    { "crash",    "crash <0-6> testa o driver bug",  c_crash },
+    { "oops",     "falha em ring 0 (recuperavel)",   c_oops },
+    { "corrupt",  "corrompe 1 byte do kernel",       c_corrupt },
+    { "heal",     "heal | heal check",               c_heal },
+    { "fsck",     "fsck [-r] verifica/repara a FAT", c_fsck },
+    { "ui",       "abre a interface",                c_ui },
+    { "reboot",   "reinicia",                        c_reboot },
+    { "exit",     "volta ao menu",                   c_exit },
 };
 #define N_CMDS ((int)(sizeof(cmds) / sizeof(cmds[0])))
 
@@ -285,7 +338,7 @@ static void c_help(char *a) {
     (void)a;
     for (int i = 0; i < N_CMDS; i++) {
         vga_puts(cmds[i].nome);
-        for (int l = strlen(cmds[i].nome); l < 9; l++) vga_putc(' ');
+        for (int l = (int)strlen(cmds[i].nome); l < 10; l++) vga_putc(' ');
         vga_puts(cmds[i].ajuda); vga_putc('\n');
         if ((i + 1) % 20 == 0 && i + 1 < N_CMDS) {
             vga_puts("-- tecla --"); kb_getc(); vga_puts("\r            \r");
@@ -318,7 +371,7 @@ void terminal_run(void) {
         while (*args == ' ') args++;
 
         if (ksetjmp(&chk) == 0) {
-            oops_ctx = &chk;                     /* falha em ring 0 aborta so este comando */
+            oops_ctx = &chk;
             executa(cmd, args);
         } else {
             __asm__ volatile ("cld; sti" ::: "memory");

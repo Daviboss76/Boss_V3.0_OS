@@ -2,13 +2,11 @@
 #define ABI_H
 #include <stdint.h>
 
-#define SLOT_BASE   0x400000u     /* memoria dos drivers de ring 3 */
+#define SLOT_BASE   0x400000u     /* memoria dos drivers */
 #define SLOT_SIZE   0x10000u      /* 64 KB por driver */
-#define MBOX_OFF    0xF000u       /* caixa de correio dentro do slot */
+#define MBOX_OFF    0xF000u       /* caixa de correio */
 #define USER_STACK  0xF000u
 #define N_SLOTS     4
-
-enum { SYS_EXIT = 0, SYS_WRITE = 1, SYS_TICKS = 2 };
 
 typedef struct {
     uint32_t op;
@@ -17,4 +15,6 @@ typedef struct {
     uint32_t len;
     uint8_t  buf[256];
 } mbox_t;
+
 #endif
+
