@@ -1,4 +1,3 @@
-; stage2.asm
 ; Montar com: nasm -f bin stage2.asm -o stage2.bin
 
 [bits 16]
@@ -10,6 +9,9 @@ KERNEL_TMP_ADDR  equ 0x10000
 KERNEL_LOAD_ADDR equ 0x100000   ; destino final (1 MB)
 SEC_BUF          equ 0x8000     ; buffer de 1 setor (BPB / diretorio)
 FAT_BUF          equ 0x8200     ; buffer de 1 setor da FAT
+VBE_INFO_BUF     equ 0x7000     ; buffer para VBE Controller Info
+VBE_MODE_BUF     equ 0x7200     ; buffer para VBE Mode Info
+VBE_DATA_ADDR    equ 0x500      ; local para guardar dados VBE para o kernel (0x500)
 
 CODE_SEG equ gdt_code - gdt_start
 DATA_SEG equ gdt_data - gdt_start
@@ -34,6 +36,7 @@ stage2_start:
     call load_bpb
     call find_kernel
     call load_kernel
+    call init_vbe_detect_only   ; Apenas deteta e guarda dados VBE, mantendo o modo texto!
     call enable_a20
     call enter_protected_mode
 
@@ -229,6 +232,113 @@ too_big:
     jmp fatal
 
 ; =========================
+; Deteao VBE (Guarda info em 0x500 SEM ligar o modo grafico)
+; =========================
+init_vbe_detec_only:
+init_vbe_detect_only:
+    pushad
+
+    ; Limpar area de dados VBE em 0x500 primeiro (coloca zeros)
+    mov edi, VBE_DATA_ADDR
+    xor ecx, ecx
+    mov ecx, 8                  ; 32 bytes limpos
+    xor eax, eax
+    rep stosd
+
+    ; 1. Obter informacoes do controlador VBE
+    mov ax, 0x4F00
+    mov di, VBE_INFO_BUF
+    int 0x10
+    cmp ax, 0x004F
+    jne .vbe_done
+
+    ; Ler ponteiro far (segmento:offset) para a lista de modos
+    mov ax, [VBE_INFO_BUF + 16]     ; Segmento da lista de modos
+    mov fs, ax
+    mov si, [VBE_INFO_BUF + 14]     ; Offset da lista de modos
+
+.mode_loop:
+    mov cx, [fs:si]                 ; Ler numero do modo
+    cmp cx, 0xFFFF
+    je .vbe_done                    ; Fim da lista
+
+    push si
+    mov ax, 0x4F01                  ; Obter informacoes do modo VBE
+    mov di, VBE_MODE_BUF
+    int 0x10
+    pop si
+
+    cmp ax, 0x004F
+    jne .next_mode
+
+    ; Verificar se suporta LFB (Linear Frame Buffer) e modo grafico
+    mov ax, [VBE_MODE_BUF]          ; Mode Attributes
+    test ax, 0x0080                 ; LFB disponivel?
+    jz .next_mode
+    test ax, 0x0010                 ; Modo grafico?
+    jz .next_mode
+
+    ; Ler resolucao e BPP
+    mov ax, [VBE_MODE_BUF + 18]     ; Width
+    mov dx, [VBE_MODE_BUF + 20]     ; Height
+    mov bl, [VBE_MODE_BUF + 25]     ; Bits per pixel
+
+    ; Prioridade 1: 800x600x32
+    cmp ax, 800
+    jne .check_1024
+    cmp dx, 600
+    jne .check_1024
+    cmp bl, 32
+    je .found_mode
+
+.check_1024:
+    ; Prioridade 2: 1024x768x32
+    cmp ax, 1024
+    jne .check_640
+    cmp dx, 768
+    jne .check_640
+    cmp bl, 32
+    je .found_mode
+
+.check_640:
+    ; Prioridade 3: 640x480x32
+    cmp ax, 640
+    jne .next_mode
+    cmp dx, 480
+    jne .next_mode
+    cmp bl, 32
+    je .found_mode
+
+.next_mode:
+    add si, 2                       ; Proximo modo (word)
+    jmp .mode_loop
+
+.found_mode:
+    ; Guardar dados VBE detetados em 0x500 para o kernel usar DEPOIS
+    mov eax, [VBE_MODE_BUF + 0x28]  ; PhysBasePtr (Framebuffer)
+    mov [VBE_DATA_ADDR + 0], eax
+
+    movzx eax, word [VBE_MODE_BUF + 18] ; Width
+    mov [VBE_DATA_ADDR + 4], eax
+
+    movzx eax, word [VBE_MODE_BUF + 20] ; Height
+    mov [VBE_DATA_ADDR + 8], eax
+
+    movzx eax, word [VBE_MODE_BUF + 16] ; Pitch (Bytes por scanline)
+    mov [VBE_DATA_ADDR + 12], eax
+
+    movzx eax, byte [VBE_MODE_BUF + 25] ; BPP
+    mov [VBE_DATA_ADDR + 16], eax
+    
+    ; IMPORTANTE: Guardamos tambem o numero do modo VBE em [VBE_DATA_ADDR + 20] 
+    ; para que o kernel possa ativá-lo via BIOS ou rotina quando quiseres!
+    mov [VBE_DATA_ADDR + 20], cx
+
+.vbe_done:
+    popad
+    ret
+
+; =========================
 ; Leitura de disco (LBA)
 ; EAX = LBA, CX = setores, ES:BX = destino
 ; =========================
@@ -333,7 +443,7 @@ KERNEL_SIZE  dd 0
 
 kernel_name db "KERNEL  BIN"
 
-msg_stage2 db "Estagio 2 carregado.", 13, 10, 0
+msg_stage2 db "Estagio 2 carregado (VBE detetado, modo texto preservado).", 13, 10, 0
 error_msg  db "Erro ao ler o disco!", 0
 part_msg   db "Particao FAT32 nao encontrada!", 0
 fs_msg     db "FAT32 invalido!", 0
@@ -378,3 +488,4 @@ pm_start:
 ; Padding: exatamente STAGE2_SECTORS setores
 ; =========================
 times STAGE2_SECTORS * 512 - ($ - $$) db 0
+

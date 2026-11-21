@@ -8,7 +8,9 @@
 #define KEY_DIR   0x104
 #define KEY_DEL   0x105
 void kb_init(void);
-int  kb_poll(void);            /* -1 se nao ha tecla */
-int  kb_getc(void);            /* bloqueante: cede CPU aos processos */
-bool kb_intr_take(void);       /* Ctrl+C pressionado desde a ultima consulta */
+int  kb_poll(void);            /* -1 se nao ha tecla (tambem consulta teclados USB) */
+int  kb_getc(void);
+bool kb_intr_take(void);
+void kb_push(int c);           /* usado pelo driver de teclado USB */
+void kb_intr_set(void);        /* Ctrl+C vindo do USB */
 #endif

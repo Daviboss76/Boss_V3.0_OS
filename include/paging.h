@@ -10,12 +10,15 @@
 #define PTE_PCD 0x010u
 
 void     paging_init(void);
-uint32_t frame_alloc(void);                 /* endereco fisico, zerado; 0 = sem memoria */
+uint32_t frame_alloc(void);
 uint32_t frame_alloc_contig(uint32_t n);
 void     frame_free(uint32_t pa);
 uint32_t frames_used(void);
 uint32_t frames_total(void);
-void     paging_wp(bool ligado);            /* protecao de escrita do proprio kernel */
+void     paging_wp(bool ligado);
 uint32_t paging_cr2(void);
-void     paging_user_set(uint32_t pt64, uint32_t pt65);   /* troca o espaco de usuario */
+void     paging_user_set(uint32_t pt64, uint32_t pt65);
+void     paging_map_mmio(uint32_t fisico, uint32_t tam);   /* identidade, sem cache (BARs de PCI) */
+void paging_allow_user(uint32_t addr, uint32_t tam);
+
 #endif

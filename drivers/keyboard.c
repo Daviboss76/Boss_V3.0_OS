@@ -2,6 +2,7 @@
 #include "arch.h"
 #include "heal.h"
 #include "sched.h"
+#include "usb.h"
 #include "keyboard.h"
 
 static const char normal[58] = {
@@ -21,34 +22,35 @@ static volatile uint8_t ini, fim;
 static volatile bool intr;
 static bool shift, ctrl, e0;
 
-static void empilha(int c) {
+void kb_push(int c) {
     uint8_t nf = (fim + 1) % KB_N;
     if (nf == ini) return;
     fila[fim] = c; fim = nf;
 }
+void kb_intr_set(void) { intr = true; }
 
 static void decodifica(uint8_t sc) {
     if (sc == 0xE0) { e0 = true; return; }
     bool solta = sc & 0x80;
     sc &= 0x7F;
-    if (sc == 0x1D) { ctrl = !solta; e0 = false; return; }       /* Ctrl esq/dir */
+    if (sc == 0x1D) { ctrl = !solta; e0 = false; return; }
     if (e0) {
         e0 = false;
         if (solta) return;
         switch (sc) {
-        case 0x48: empilha(KEY_CIMA);  break;
-        case 0x50: empilha(KEY_BAIXO); break;
-        case 0x4B: empilha(KEY_ESQ);   break;
-        case 0x4D: empilha(KEY_DIR);   break;
-        case 0x53: empilha(KEY_DEL);   break;
+        case 0x48: kb_push(KEY_CIMA);  break;
+        case 0x50: kb_push(KEY_BAIXO); break;
+        case 0x4B: kb_push(KEY_ESQ);   break;
+        case 0x4D: kb_push(KEY_DIR);   break;
+        case 0x53: kb_push(KEY_DEL);   break;
         }
         return;
     }
     if (sc == 0x2A || sc == 0x36) { shift = !solta; return; }
-    if (ctrl && sc == 0x2E) { if (!solta) intr = true; return; } /* Ctrl+C */
+    if (ctrl && sc == 0x2E) { if (!solta) intr = true; return; }
     if (solta || sc >= 58) return;
     char c = shift ? shifted[sc] : normal[sc];
-    if (c) empilha((uint8_t)c);
+    if (c) kb_push((uint8_t)c);
 }
 
 static void irq1(regs_t *r) {
@@ -61,7 +63,9 @@ void kb_init(void) {
     while (inb(0x64) & 1) inb(0x60);
     irq_register(1, irq1);
 }
+
 int kb_poll(void) {
+    usb_poll();                                   /* teclados USB (limitado a 50 Hz) */
     if (ini == fim) return -1;
     int c = fila[ini];
     ini = (ini + 1) % KB_N;

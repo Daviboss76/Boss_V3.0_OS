@@ -6,7 +6,7 @@
 #define SLOT_SIZE   0x10000u      /* 64 KB por driver */
 #define MBOX_OFF    0xF000u       /* caixa de correio */
 #define USER_STACK  0xF000u
-#define N_SLOTS     4
+#define N_SLOTS     6
 
 typedef struct {
     uint32_t op;

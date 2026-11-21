@@ -9,6 +9,8 @@ extern const uint8_t blob_rtc[],  blob_rtc_end[];
 extern const uint8_t blob_beep[], blob_beep_end[];
 extern const uint8_t blob_crc[],  blob_crc_end[];
 extern const uint8_t blob_bug[],  blob_bug_end[];
+extern const uint8_t blob_intel_e1000[], blob_intel_e1000_end[];
+extern const uint8_t blob_mouse_r3[], blob_mouse_r3_end[];
 
 typedef struct {
     const char *nome;
@@ -20,11 +22,14 @@ typedef struct {
 } drv_t;
 
 static drv_t drv[] = {
-    { "rtc",  blob_rtc,  blob_rtc_end,  { 0x70, 0x71 },       2, 20 },
-    { "beep", blob_beep, blob_beep_end, { 0x42, 0x43, 0x61 }, 3, 300 },
-    { "crc",  blob_crc,  blob_crc_end,  { 0 },                0, 50 },
-    { "bug",  blob_bug,  blob_bug_end,  { 0 },                0, 30 },
+    { "rtc",         blob_rtc,         blob_rtc_end,         { 0x70, 0x71 },       2, 20,  0, {0}, 0, 0, 0, 0, 0 },
+    { "beep",        blob_beep,        blob_beep_end,        { 0x42, 0x43, 0x61 }, 3, 300, 0, {0}, 0, 0, 0, 0, 0 },
+    { "crc",         blob_crc,         blob_crc_end,         { 0 },                0, 50,  0, {0}, 0, 0, 0, 0, 0 },
+    { "bug",         blob_bug,         blob_bug_end,         { 0 },                0, 30,  0, {0}, 0, 0, 0, 0, 0 },
+    { "intel_e1000", blob_intel_e1000, blob_intel_e1000_end, { 0 },                0, 100, 0, {0}, 0, 0, 0, 0, 0 },
+    { "mouse_r3",    blob_mouse_r3,    blob_mouse_r3_end,    { 0x60, 0x64 },       2, 50,  0, {0}, 0, 0, 0, 0, 0 },
 };
+
 #define N_DRV ((int)(sizeof drv / sizeof drv[0]))
 _Static_assert(sizeof drv / sizeof drv[0] <= N_SLOTS, "slots insuficientes");
 

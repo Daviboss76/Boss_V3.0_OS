@@ -14,12 +14,33 @@
 #include "disktool.h"
 #include "ui.h"
 #include "terminal.h"
+#include "ota.h"
+#include "ota_net.h"
+#include "net.h"
 
 #define COR_TXT VGA_COR(VGA_CINZA, VGA_PRETO)
 #define COR_PS1 VGA_COR(VGA_VERDE_CL, VGA_PRETO)
 
+#define OTA_BUF_MAX 262144u /* 256 KB para imagens de kernel */
+
 static char filebuf[32768];            /* limite de cat/write/cp/crc: 32 KB */
+static uint8_t ota_buf[OTA_BUF_MAX];
 static bool sair;
+static bool ota_pronto;
+
+/* TODO: conecte aqui a sua funcao real de envio (ex.: TCP/UDP/socket ou net_send_frame) */
+static int boss_ota_tx(const void *data, uint32_t len) {
+    (void)data;
+    (void)len;
+    return -1;
+}
+
+/* TODO: conecte aqui a sua funcao real de recepcao (retorna qtd lida, 0 = sem dados, <0 = erro) */
+static int boss_ota_rx(void *buf, uint32_t max_len) {
+    (void)buf;
+    (void)max_len;
+    return -1;
+}
 
 static char *prox(char **s) {
     char *p = *s;
@@ -35,6 +56,21 @@ static uint32_t num(const char *s) {
     while (*s >= '0' && *s <= '9') v = v * 10 + (*s++ - '0');
     return v;
 }
+static uint32_t hex32(const char *s) {
+    uint32_t v = 0;
+    if (!s) return 0;
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+    while (*s) {
+        char c = *s++;
+        uint32_t d;
+        if (c >= '0' && c <= '9') d = (uint32_t)(c - '0');
+        else if (c >= 'a' && c <= 'f') d = 10u + (uint32_t)(c - 'a');
+        else if (c >= 'A' && c <= 'F') d = 10u + (uint32_t)(c - 'A');
+        else break;
+        v = (v << 4) | d;
+    }
+    return v;
+}
 static void dois(uint32_t v) { vga_putc('0' + v / 10); vga_putc('0' + v % 10); }
 static void erro(int e) {
     vga_puts("erro: ");
@@ -48,6 +84,88 @@ static void drv_erro(int e) {
              e == DRV_EQUAR  ? "em quarentena (veja 'heal')" :
                                "falhou mesmo apos reiniciar (veja 'heal')");
     vga_putc('\n');
+}
+
+static void ota_erro(ota_status_t st) {
+    vga_puts("ota: ");
+    switch (st) {
+    case OTA_OK:           vga_puts("ok\n"); break;
+    case OTA_ERR_REDE:     vga_puts("falha de rede\n"); break;
+    case OTA_ERR_TAMANHO:  vga_puts("tamanho invalido\n"); break;
+    case OTA_ERR_CRC:      vga_puts("CRC32 nao confere\n"); break;
+    case OTA_ERR_FS_WRITE: vga_puts("erro ao gravar no FAT32\n"); break;
+    case OTA_ERR_FS_RM:    vga_puts("erro ao remover KERNEL.BIN antigo\n"); break;
+    case OTA_ERR_FS_FLUSH: vga_puts("erro no flush do disco\n"); break;
+    default:               vga_puts("erro desconhecido\n"); break;
+    }
+}
+
+static void garantir_ota_init(void) {
+    if (!ota_pronto) {
+        ota_bind_fat32();
+        ota_pronto = true;
+    }
+}
+
+static int executar_ota_arquivo(const char *path, uint32_t crc_esp, bool reboot_depois) {
+    garantir_ota_init();
+
+    bool is_dir = false;
+    uint32_t tam_arq = 0;
+    int r = fs_stat(path, &is_dir, &tam_arq);
+    if (r) { erro(r); return -1; }
+    if (is_dir) { erro(FS_EISDIR); return -1; }
+    if (tam_arq == 0 || tam_arq > OTA_BUF_MAX) {
+        vga_puts("ota: arquivo vazio ou maior que o buffer (max ");
+        put_dec(OTA_BUF_MAX);
+        vga_puts(" bytes)\n");
+        return -1;
+    }
+
+    uint32_t lido = 0;
+    r = fs_read(path, ota_buf, OTA_BUF_MAX, &lido);
+    if (r) { erro(r); return -1; }
+
+    uint32_t crc_calc = ota_crc32(ota_buf, lido);
+    vga_puts("ota: lidos "); put_dec(lido);
+    vga_puts(" bytes, crc32=0x"); put_hex(crc_calc, 8); vga_putc('\n');
+
+    ota_status_t st = ota_aplicar_imagem(ota_buf, lido, crc_esp, reboot_depois);
+    if (st != OTA_OK) {
+        ota_erro(st);
+        return -1;
+    }
+
+    vga_puts("ota: KERNEL.BIN atualizado com seguranca no FAT32\n");
+    return 0;
+}
+
+static int executar_ota_rede(const char *host, const char *path, bool reboot_depois) {
+    garantir_ota_init();
+
+    ota_http_cfg_t cfg = {
+        .host_header   = (host && host[0]) ? host : "10.0.2.2:8080",
+        .path          = (path && path[0]) ? path : "/KERNEL.BIN",
+        .tx            = boss_ota_tx,
+        .rx            = boss_ota_rx,
+        .download_buf  = ota_buf,
+        .buf_cap       = OTA_BUF_MAX,
+        .max_poll_iter = 500000u
+    };
+
+    vga_puts("ota: baixando de ");
+    vga_puts(cfg.host_header);
+    vga_puts(cfg.path);
+    vga_puts("...\n");
+
+    ota_status_t st = ota_baixar_e_aplicar(&cfg, reboot_depois);
+    if (st != OTA_OK) {
+        ota_erro(st);
+        return -1;
+    }
+
+    vga_puts("ota: download e atualizacao concluídos\n");
+    return 0;
 }
 
 static void ler_linha(char *buf, int max) {
@@ -198,6 +316,32 @@ static void c_fsck(char *a) {
     vga_putc('\n');
 }
 
+/* ---------- atualizacao (OTA) ---------- */
+static void c_ota(char *a) {
+    char *arq = prox(&a);
+    if (!arq) { falta(); return; }
+    char *crc_s = prox(&a);
+    uint32_t crc_esp = crc_s ? hex32(crc_s) : 0;
+    executar_ota_arquivo(arq, crc_esp, false);
+}
+static void c_ota_apply(char *a) {
+    char *arq = prox(&a);
+    if (!arq) { falta(); return; }
+    char *crc_s = prox(&a);
+    uint32_t crc_esp = crc_s ? hex32(crc_s) : 0;
+    executar_ota_arquivo(arq, crc_esp, true);
+}
+static void c_ota_fetch(char *a) {
+    char *host = prox(&a);
+    char *path = prox(&a);
+    executar_ota_rede(host, path, false);
+}
+static void c_ota_net_apply(char *a) {
+    char *host = prox(&a);
+    char *path = prox(&a);
+    executar_ota_rede(host, path, true);
+}
+
 /* ---------- ring 3 / autorreparo ---------- */
 static void c_drv(char *a) {
     (void)a;
@@ -293,44 +437,48 @@ static void c_kill(char *a) {
 typedef struct { const char *nome, *ajuda; void (*fn)(char *); } cmd_t;
 static void c_help(char *a);
 static const cmd_t cmds[] = {
-    { "help",     "lista os comandos",               c_help },
-    { "clear",    "limpa a tela",                    c_clear },
-    { "ver",      "versao do sistema",               c_ver },
-    { "uptime",   "tempo ligado",                    c_uptime },
-    { "echo",     "echo <texto>",                    c_echo },
-    { "date",     "hora (driver rtc em ring 3)",     c_date },
-    { "lspci",    "dispositivos PCI",                c_lspci },
-    { "disks",    "discos fisicos e volumes",        c_disks },
-    { "disktool", "gerenciador de discos/particoes", c_disktool },
-    { "install",  "instalador guiado",               c_install },
-    { "df",       "espaco do volume BOSSOS",         c_df },
-    { "pwd",      "diretorio atual",                 c_pwd },
-    { "cd",       "cd <pasta>",                      c_cd },
-    { "ls",       "ls [pasta]",                      c_ls },
-    { "cat",      "cat <arquivo>",                   c_cat },
-    { "write",    "write <arquivo> <texto>",         c_write },
-    { "touch",    "touch <arquivo>",                 c_touch },
-    { "mkdir",    "mkdir <pasta>",                   c_mkdir },
-    { "rm",       "rm <arquivo|pasta vazia>",        c_rm },
-    { "cp",       "cp <origem> <destino>",           c_cp },
-    { "hexdump",  "hexdump <arquivo> (256 bytes)",   c_hexdump },
-    { "run",      "run <prog.elf> (Ctrl+C mata)",    c_run },
-    { "bg",       "bg <prog.elf> (segundo plano)",   c_bg },
-    { "ps",       "lista processos",                 c_ps },
-    { "kill",     "kill <pid>",                      c_kill },
-    { "mem",      "memoria e paginacao",             c_mem },
-    { "smash",    "escreve no texto do kernel (#PF)",c_smash },
-    { "drv",      "drivers de ring 3 e estado",      c_drv },
-    { "beep",     "beep [hz] [ms] (ring 3)",         c_beep },
-    { "crc",      "crc <arquivo> (CRC32 em ring 3)", c_crc },
-    { "crash",    "crash <0-6> testa o driver bug",  c_crash },
-    { "oops",     "falha em ring 0 (recuperavel)",   c_oops },
-    { "corrupt",  "corrompe 1 byte do kernel",       c_corrupt },
-    { "heal",     "heal | heal check",               c_heal },
-    { "fsck",     "fsck [-r] verifica/repara a FAT", c_fsck },
-    { "ui",       "abre a interface",                c_ui },
-    { "reboot",   "reinicia",                        c_reboot },
-    { "exit",     "volta ao menu",                   c_exit },
+    { "help",          "lista os comandos",               c_help },
+    { "clear",         "limpa a tela",                    c_clear },
+    { "ver",           "versao do sistema",               c_ver },
+    { "uptime",        "tempo ligado",                    c_uptime },
+    { "echo",          "echo <texto>",                    c_echo },
+    { "date",          "hora (driver rtc em ring 3)",     c_date },
+    { "lspci",         "dispositivos PCI",                c_lspci },
+    { "disks",         "discos fisicos e volumes",        c_disks },
+    { "disktool",      "gerenciador de discos/particoes", c_disktool },
+    { "install",       "instalador guiado",               c_install },
+    { "df",            "espaco do volume BOSSOS",         c_df },
+    { "pwd",           "diretorio atual",                 c_pwd },
+    { "cd",            "cd <pasta>",                      c_cd },
+    { "ls",            "ls [pasta]",                      c_ls },
+    { "cat",           "cat <arquivo>",                   c_cat },
+    { "write",         "write <arquivo> <texto>",         c_write },
+    { "touch",         "touch <arquivo>",                 c_touch },
+    { "mkdir",         "mkdir <pasta>",                   c_mkdir },
+    { "rm",            "rm <arquivo|pasta vazia>",        c_rm },
+    { "cp",            "cp <origem> <destino>",           c_cp },
+    { "hexdump",       "hexdump <arquivo> (256 bytes)",   c_hexdump },
+    { "run",           "run <prog.elf> (Ctrl+C mata)",    c_run },
+    { "bg",            "bg <prog.elf> (segundo plano)",   c_bg },
+    { "ps",            "lista processos",                 c_ps },
+    { "kill",          "kill <pid>",                      c_kill },
+    { "mem",           "memoria e paginacao",             c_mem },
+    { "smash",         "escreve no texto do kernel (#PF)",c_smash },
+    { "drv",           "drivers de ring 3 e estado",      c_drv },
+    { "beep",          "beep [hz] [ms] (ring 3)",         c_beep },
+    { "crc",           "crc <arquivo> (CRC32 em ring 3)", c_crc },
+    { "crash",         "crash <0-6> testa o driver bug",  c_crash },
+    { "oops",          "falha em ring 0 (recuperavel)",   c_oops },
+    { "corrupt",       "corrompe 1 byte do kernel",       c_corrupt },
+    { "heal",          "heal | heal check",               c_heal },
+    { "fsck",          "fsck [-r] verifica/repara a FAT", c_fsck },
+    { "ota",           "ota <arq> [crc_hex] atualiza",    c_ota },
+    { "ota_apply",     "ota_apply <arq> [crc] + reboot",  c_ota_apply },
+    { "ota_fetch",     "ota_fetch [host:porta] [/arq]",   c_ota_fetch },
+    { "ota_net_apply", "ota_net_apply [host] [/arq]+reb", c_ota_net_apply },
+    { "ui",            "abre a interface",                c_ui },
+    { "reboot",        "reinicia",                        c_reboot },
+    { "exit",          "volta ao menu",                   c_exit },
 };
 #define N_CMDS ((int)(sizeof(cmds) / sizeof(cmds[0])))
 
@@ -381,3 +529,4 @@ void terminal_run(void) {
     }
     oops_ctx = prev;
 }
+
